@@ -42,23 +42,39 @@ def _expect_revert(label: str, fn, needle: str, address: str = "") -> None:
     On Studionet a `UserError` revert is reported as a FINALIZED transaction
     whose `result` field is the revert message (exit code 1), not as an RPC
     exception, so the message must be read from the transaction record.
+
+    The index that serves `sim_getTransactionsForAddress` lags finalization
+    slightly, so a single read can miss the just-sent transaction and report
+    "(no result)". Poll for it instead; only give up once the whole window
+    elapses, and if the tx is present but the record still has no result,
+    report that text so a genuine contract change is not mistaken for lag.
     """
     tx, info = fn()
     if not address:
         # The receipt tells us which contract the tx targeted.
         address = _tx_target(info)
     client = glnet.chain_client()
+
     text = ""
-    try:
-        raw = client.provider.make_request(
-            method="sim_getTransactionsForAddress", params=[address]
-        ).get("result") or []
+    seen = False
+    for _ in range(20):
+        try:
+            raw = client.provider.make_request(
+                method="sim_getTransactionsForAddress", params=[address]
+            ).get("result") or []
+        except Exception:  # noqa: BLE001 - retried below; also lag-tolerant
+            raw = []
         for t in raw:
             if t.get("hash") == tx:
+                seen = True
                 text = str(t.get("result") or "")
                 break
-    except Exception:  # noqa: BLE001 - the check below reports the failure
-        pass
+        if text:
+            break
+        time.sleep(3)
+
+    if not seen:
+        _check(label, False, "tx never appeared in the address index")
     _check(label, needle.lower() in text.lower(), text[:160] or "(no result)")
 
 

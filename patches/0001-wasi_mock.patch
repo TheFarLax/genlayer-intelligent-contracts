@@ -1,0 +1,99 @@
+--- a/gltest/direct/wasi_mock.py
++++ b/gltest/direct/wasi_mock.py
+@@ -85,6 +85,22 @@
+ _CROSS_CONTRACT_OPS = frozenset({"DeployContract", "CallContract", "PostMessage"})
+ 
+ 
++def _json_text(value: Any) -> str:
++    """Render a mock response as JSON text when calldata cannot carry it.
++
++    Floats are the common case: calldata has no float encoding, yet LLM
++    replies commonly contain them.
++    """
++    import json
++
++    def _default(obj: Any) -> Any:
++        if isinstance(obj, (bytes, bytearray)):
++            return obj.decode("utf-8", "replace")
++        return str(obj)
++
++    return json.dumps(value, default=_default)
++
++
+ def gl_call(data: bytes, /) -> int:
+     """
+     Execute a GenVM call operation.
+@@ -118,19 +134,29 @@
+     if response is None:
+         return 2**32 - 1
+ 
+-    # If response is already bytes (from RunNondet), use directly
+-    # RunNondet handles its own ResultCode prefix for sub-VM result format
+     if isinstance(response, bytes):
++        # RunNondet: already in sub-VM ResultCode format, use directly
+         encoded = response
+     else:
+-        # Regular responses (web, llm, etc) are just calldata-encoded
+-        # The SDK's _decode_nondet expects plain {"ok": ...} format
++        # Regular responses (web, llm, etc) are calldata-encoded; the SDK's
++        # _decode_nondet expects plain {"ok": ...}.
++        #
++        # Calldata has no float representation, but LLM reply bodies routinely
++        # contain floats. Real GenVM hands raw JSON text back over the ABI, so
++        # mirror that: encodable values go through calldata, anything else is
++        # delivered as JSON text and the SDK parses it.
+         try:
+             from genlayer.py import calldata
+             encoded = calldata.encode(response)
+-        except Exception as e:
+-            vm._trace(f"gl_call encode error: {e}")
+-            return 2**32 - 1
++        except Exception:
++            # The SDK still needs the {"ok": ...} envelope, so only the inner
++            # payload degrades to JSON text.
++            if isinstance(response, dict) and "ok" in response:
++                payload = dict(response)
++                payload["ok"] = _json_text(payload["ok"])
++            else:
++                payload = _json_text(response)
++            encoded = calldata.encode(payload)
+ 
+     fd_counter = getattr(_local, 'fd_counter', 100)
+     fd = fd_counter
+@@ -356,6 +382,12 @@
+     vm._in_nondet = True
+     try:
+         result = leader_fn(None)
++        # The leader function typically ends in a Lazily-evaluated SDK call
++        # (`Lazy[T]` from _lazy_api). Production GenVM drains it inside the
++        # sub-VM; direct mode must do the same or callers see the wrapper
++        # object instead of the decoded value.
++        if hasattr(result, "_eval") and callable(getattr(result, "get", None)):
++            result = result.get()
+         # Wrap result in Return format (code 0 + calldata)
+         encoded = bytes([0]) + calldata.encode(result)
+         return encoded
+@@ -367,6 +399,23 @@
+         vm._in_nondet = False
+ 
+ 
++def _self_patch_fdopen() -> None:
++    """Route the stdlib's own os.fdopen through patched_fdopen.
++
++    unittest.mock.patch('os.fdopen', ...) swaps the attribute on the module,
++    but the C-level `os` module object that `import os` hands out is the same
++    one the interpreter shares, so a later `fake_open` in fakes.py (which does
++    `from genlayer.py.types import ...; os.fdopen = ...` style rebinding) can
++    silently restore the real one. Rebinding here makes the interception
++    durable for the whole session.
++
++    Contracts reach fdopen through `os.fdopen(fd, 'rb')` in the SDK's
++    gl_call_generic; without this every nondet read returns an empty result
++    (Lazy -> None) because the fd is a BytesIO, not a real descriptor.
++    """
++    os.fdopen = patched_fdopen
++
++
+ def patched_fdopen(fd_arg: int, mode: str = "r", *args, **kwargs):
+     """Patched os.fdopen that intercepts mock file descriptors."""
+     fd_buffers = getattr(_local, 'fd_buffers', {})

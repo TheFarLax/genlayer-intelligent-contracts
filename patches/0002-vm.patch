@@ -1,0 +1,10 @@
+--- a/gltest/direct/vm.py
++++ b/gltest/direct/vm.py
+@@ -475,6 +475,7 @@
+             wasi_mock.set_vm(self)
+             sys.modules['_genlayer_wasi'] = wasi_mock
+ 
++            wasi_mock._self_patch_fdopen()
+             stack.enter_context(
+                 patch('os.fdopen', wasi_mock.patched_fdopen)
+             )

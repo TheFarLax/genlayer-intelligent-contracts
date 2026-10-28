@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+artifacts/
+
+# Never commit wallet material. The signing key lives in the glvenv keystore
+# (~/.genlayer/keystores/) and its password in ~/.genlayer/.bundle1-builder.pw;
+# neither belongs in this repo.
+*.pw
+keystores/

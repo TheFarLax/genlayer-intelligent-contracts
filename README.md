@@ -11,7 +11,7 @@ constructor-address circularity between the two.
 | 1 | ClaimPin | Pins a web claim and re-checks it against its live source | 18 | deployed & verified |
 | 2 | ForecastLedger | Registers price-direction forecasts, settles them against a live source | 29 | deployed & verified incl. live settlement |
 | 3 | OutcomeFeed | Append-only, idempotent feed of decided outcomes | 24 | deployed & verified |
-| 4 | DepositSplit | Weighted, payable split of a deposited pot with duplicate-settlement protection and a creator void path | 24 | deployed & verified |
+| 4 | DepositSplit | Weighted, payable split of a deposited pot with duplicate-settlement protection and a creator void path | 24 | deployed; `create`/`preview` verified live, **claim/void payouts not yet exercised on chain** |
 
 Total: **95 direct-mode tests pass** (`/root/glvenv/bin/python -m pytest tests/direct -q`).
 
@@ -29,7 +29,9 @@ contracts/           one .py file per contract (GenVM Python)
 tests/direct/        pytest suites run through the gltest direct harness
 scripts/glnet.py     deploy / read / write helpers bound to Studionet
 scripts/verify.py    end-to-end live checks against a deployment
+patches/             diffs against gltest 0.29.2 needed by the test harness
 deployments/         one JSON per deployment: address, tx, source hash
+docs/usage.md        per-contract usage examples: inputs and expected outputs
 docs/                historical debugging notes (SpecLint)
 archive/             dropped-contract sources, preserved for reference
 ```
@@ -38,11 +40,24 @@ archive/             dropped-contract sources, preserved for reference
 
 ```
 python3 -m venv /root/glvenv
-/root/glvenv/bin/pip install genlayer-test genlayer-py eth-account
+/root/glvenv/bin/python -m ensurepip                       # pip 25.0.1 here
+/root/glvenv/bin/python -m pip install \
+    genlayer-test==0.29.2 genlayer-py==0.16.3 eth-account
+
+# The three harness patches are REQUIRED for the tests; see below.
+SP=/root/glvenv/lib/python3.12/site-packages
+cd $SP && patch -p1 < /root/bundle1/patches/0001-wasi_mock.patch \
+          && patch -p1 < /root/bundle1/patches/0002-vm.patch
+cd /root/bundle1
+
 genlayer account create --name bundle1-builder
 # store its password where glnet.py expects it, 0600:
-echo '<password>' > ~/.genlayer/.bundle1-builder.pw
+umask 077 && echo '<password>' > ~/.genlayer/.bundle1-builder.pw
 ```
+
+The Python version matters for the patch path: this environment is
+CPython 3.12.14, so the patched tree is under `python3.12`. On a different
+minor version, adjust `SP` accordingly.
 
 `glnet.py` refuses to sign with any keystore other than `bundle1-builder`,
 never prints or writes the private key, and reads the password from
@@ -62,8 +77,25 @@ cd /root/bundle1
 ```
 
 The direct-mode harness runs each contract inside the real GenVM wasm runtime
-locally (mock web + LLM). No network or GEN is required. Three defects in the
-harness itself were patched in the installed package; see "Known limitations".
+locally (mock web + LLM). No network or GEN is required.
+
+**The tests depend on three patches to the installed `gltest` package**
+(`/root/glvenv/lib/python3.12/site-packages/gltest/direct/`), shipped as
+real diffs in `patches/`. A plain `pip install genlayer-test==0.29.2` will
+run the suite against a harness that silently returns `None` from nondet
+calls. Apply them first:
+
+```
+SP=/root/glvenv/lib/python3.12/site-packages
+cd $SP && patch -p1 < /root/bundle1/patches/0001-wasi_mock.patch \
+          && patch -p1 < /root/bundle1/patches/0002-vm.patch
+```
+
+The patches were generated from a pristine 0.29.2 install, verified to apply
+cleanly, and reproduce the working files byte-for-byte (SHA-256 match). What
+each one fixes — `os.fdopen` interception, draining the `Lazy` returned by
+`run_nondet`, and a JSON-text fallback for float mock replies — is explained
+in `docs/usage.md` under "Reproducing the test environment".
 
 ## Deploying
 
@@ -112,10 +144,12 @@ per contract, against the chain with real consensus and real models:
 
 - **ClaimPin** — `register` finalizes and `get_claim` returns the full record;
   empty-claim and non-http-source inputs revert with the expected messages;
-  `count` is unchanged by rejected writes. Rechecking against a live web
-  source produced a correct `holds` verdict with a quoted deciding fact and
-  evidence hash, a correct `undeterminable` for an uninformative source, and
-  clean rejection of invalid inputs without corrupting state.
+  `count` is unchanged by rejected writes. Separately (not part of
+  `verify.py`, which only covers the deterministic write path), rechecking
+  against a live web source produced a correct `holds` verdict with a quoted
+  deciding fact and evidence hash, and a correct `undeterminable` for an
+  uninformative source. Those recheck runs were one-off live calls, not
+  re-runnable by script.
 - **ForecastLedger** — `register` finalizes with the record readable and
   `status=pending`; past-deadline and invalid-direction registrations revert
   with the expected messages; settling before the deadline reverts with
@@ -148,12 +182,27 @@ per contract, against the chain with real consensus and real models:
 - **DepositSplit** — a payable `create` of 1000 with weights [1, 3] records
   `total=1000` and previews 250/750; zero-value and duplicate-recipient
   creates revert with the expected messages; `count` unchanged by rejections.
+  **Not verified live:** `claim` (the `emit_transfer` payout), split closing,
+  and the `void` refund. Those paths are covered only by direct-mode tests —
+  the transfer leg has never been exercised against Studionet. See
+  `docs/usage.md` for the exact list of unverified items.
 
 Rerun any of them with:
 
 ```
 /root/glvenv/bin/python scripts/verify.py <contract>
 ```
+
+All four verifiers were run again on 2026-10-28 against the current
+deployments and reported `ALL CHECKS PASSED`:
+`claimpin`, `forecastledger`, `outcomefeed`, `depositsplit`. These runs are
+write-side smoke tests (they add records), so the live counts grow with each
+rerun; that is expected, not drift. One fix was needed in `verify.py` for
+these runs: the Studionet transaction index lags finalization, so
+`_expect_revert` now polls for the transaction record instead of reading it
+once. Without the poll it intermittently reported `(no result)` even though
+the revert was recorded correctly on chain — a verifier timing bug, not a
+contract defect.
 
 ## Interacting with each contract
 
@@ -162,6 +211,11 @@ Views: `count`, plus per-contract getters (`get_claim`, `get_forecast`,
 `get`, `get_split`, `subject_tally`, `get_record`, `get_producer`,
 `get_authorized`, …). Writes: `register`/`recheck`, `register`/`settle`,
 `append`/`authorize`, `create`/`claim`/`void`.
+
+**`docs/usage.md` has a worked example per contract**: exact argument lists
+with realistic values, the expected view output after each call, and the
+exact revert message for each rejected input. It also carries the
+verified-vs-unverified table and the harness reproduction steps.
 
 ## Design notes
 
@@ -195,12 +249,14 @@ Views: `count`, plus per-contract getters (`get_claim`, `get_forecast`,
 1. **`sim_fundAccount` never credited** the dedicated wallet
    (0x05C55d…) despite reporting FINALIZED. The wallet was funded manually
    through the faucet instead.
-2. **Three harness patches live in the installed gltest package**, not in
-   this repo: (a) `os.fdopen` interception so mock LLM/web replies reach the
-   SDK, (b) draining the `Lazy` result of `run_nondet` before encoding,
+2. **The test harness needs three patches** to the installed gltest package,
+   provided in `patches/` and explained in `docs/usage.md`: (a) durable
+   `os.fdopen` interception so mock LLM/web replies reach the SDK, (b)
+   draining the `Lazy` returned by `run_nondet` before calldata encoding,
    (c) a JSON-text fallback when a mock reply contains floats, which calldata
-   cannot encode. Without them the direct harness silently returns `None` from
-   nondet calls. They affect only the local test environment, not the chain.
+   cannot encode. Without them the direct harness silently returns `None`
+   from nondet calls. They affect only the local test environment, not the
+   chain.
 3. **Intermittent environment faults**: DNS failures for
    `studio.genlayer.com` and connection resets interrupted some sessions; all
    helpers retry transient network errors but never mask real ones.
@@ -213,3 +269,11 @@ Views: `count`, plus per-contract getters (`get_claim`, `get_forecast`,
    can sit in `ACCEPTED` past the 2-second wait and still finalize; treat
    "timed out waiting" as "still processing" and re-check the status before
    concluding anything.
+6. **DepositSplit payouts are floored**, so a split only reaches `finalized`
+   when the floors sum to `total`. `total=1000, weights=[1,3]` distributes
+   exactly; `total=1000, weights=[1,1,1]` leaves 1 wei in the contract and
+   the split stays `open` forever (and cannot be voided once a share is
+   paid). Real amounts in micro-units make this negligible, but it is a
+   genuine edge case.
+7. **ClaimPin's cooldown and sticky-`broken` behavior** are covered by direct
+   tests only; they were not separately exercised against Studionet.
