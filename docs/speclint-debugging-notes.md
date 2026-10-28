@@ -5,7 +5,48 @@ differently on Studionet than in the direct-mode test harness. These notes
 record what was actually observed, because a future change to the contract or
 to GenVM releases may invalidate the workaround.
 
-## Symptom
+## The decisive evidence: UNDETERMINED receipts
+
+The transaction record for a failed `analyze` (tx
+`0xaaef9385…2e9599`, deployment `0xA899…c7e`) shows the real mechanism:
+
+- The **leader** executed successfully. Its `eq_outputs` contained the model's
+  full, correct reply:
+  `{"acceptance":25,"ambiguities":[],"ambiguous":false,"assumptions":[],
+  "clarity_score":100,"constraints":25,"deliverables":25,"scope":25,"summary":""}`
+  and its final `result` was the report id `"48eaabd7bd-48eaab"`.
+- Three validators voted **disagree** and two **idle**, so the transaction
+  ended **UNDETERMINED** and its writes were discarded — which is exactly the
+  observed symptom: `analyze` "succeeded" from the leader's perspective, the
+  caller saw a result, but `get_report` found nothing because the transaction
+  never finalized.
+- None of the disagreeing validators produced `eq_outputs` of their own; the
+  idle ones show `CONSENSUS_VALIDATOR_QUORUM_REACHED` cancellations. So the
+  validator function (the `_validator_core` comparison) apparently did not run
+  as written, or its failure was reported as a plain "disagree" vote.
+
+Two consequences follow:
+
+1. The "storage write disappears" theory was wrong in an important way: the
+   writes were discarded because the transaction was UNDETERMINED, not because
+   a finalized write went missing. A FINALIZED run on the older
+   counter-based id scheme (deployment `0x70CD…Df57`) did leave `count == 1`
+   and the report record — but with a *counter-derived id* whose `count`
+   itself is unreliable for lookup, so reads still needed to guess the id.
+2. Any exception inside a validator is reported to consensus as "disagree"
+   (`run_nondet_unsafe` documents that validator errors are equivalent to
+   returning `False`). The validator now wraps its entire body in
+   `try/except` → explicit `False`, so only genuine disagreement rejects.
+
+## Why the direct tests could not catch this
+
+The direct-mode harness runs the code, not the consensus. There is no
+multi-node vote, no commit-reveal, no quorum cancellation — `run_nondet`
+executes leader and validator once and compares locally. That is why 12/12
+tests pass while the chain ends UNDETERMINED. This gap is inherent to the
+harness, not a bug in the tests.
+
+## Earlier symptom (kept for the record)
 
 `analyze` returned a report id and the transaction reached `FINALIZED` with a
 successful result, but:
