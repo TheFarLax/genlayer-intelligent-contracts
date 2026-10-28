@@ -1,0 +1,12 @@
+{
+  "contract": "claimpin",
+  "network": "studionet",
+  "chain_id": 61999,
+  "rpc": "https://studio.genlayer.com/api",
+  "address": "0x93f8E437CB0AdA264c13Ae0b8D1068507157d63A",
+  "deployer": "0x05C55d0d2Ba7fe495492849fEca1BF2bBF939a4C",
+  "deploy_tx": "0x30a625f0b957993efb8607e29d23ecacb1ecf9b6ffa518ad6057186aad17edbf",
+  "status": "FINALIZED",
+  "constructor_args": [],
+  "source_sha256": "a02adbb1d16ccbe291f4b078d4a374fdfba6651ea9e99c7d2300a34dc1b3ef6d"
+}

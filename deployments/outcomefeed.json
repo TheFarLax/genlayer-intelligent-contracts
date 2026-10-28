@@ -1,0 +1,14 @@
+{
+  "contract": "outcomefeed",
+  "network": "studionet",
+  "chain_id": 61999,
+  "rpc": "https://studio.genlayer.com/api",
+  "address": "0xc02784300D9E58cCd26feB6B97205bc5a8fFDc8C",
+  "deployer": "0x05C55d0d2Ba7fe495492849fEca1BF2bBF939a4C",
+  "deploy_tx": "0x4abd7782637c229935502ab6249f2cf72c1ad567873e41d97fd4a084940b01a3",
+  "status": "FINALIZED",
+  "constructor_args": [
+    "0x05c55d0d2ba7fe495492849feca1bf2bbf939a4c"
+  ],
+  "source_sha256": "22876407616f1d61bd784074227f7c986d71f60d40ad13bba67ad15d2647426f"
+}

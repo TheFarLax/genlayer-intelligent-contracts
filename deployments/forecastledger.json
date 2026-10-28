@@ -1,0 +1,14 @@
+{
+  "contract": "forecastledger",
+  "network": "studionet",
+  "chain_id": 61999,
+  "rpc": "https://studio.genlayer.com/api",
+  "address": "0x6A7EaE7CD1c6031398262aDE72C1c5eb3D8D46CE",
+  "deployer": "0x05C55d0d2Ba7fe495492849fEca1BF2bBF939a4C",
+  "deploy_tx": "0x6328928a705ff50f1929005e42e14175fc8738ee9f5488b3d73beb43b5db4275",
+  "status": "FINALIZED",
+  "constructor_args": [
+    "0xc02784300D9E58cCd26feB6B97205bc5a8fFDc8C"
+  ],
+  "source_sha256": "ce02ee12a088d199281917bf525146cbf405d335546ecdfcf4dd42c189a2a86e"
+}
