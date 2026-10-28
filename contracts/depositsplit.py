@@ -180,8 +180,9 @@ class DepositSplit(gl.Contract):
         if share.paid:
             raise gl.vm.UserError("already paid")
 
-        amount = _share_amount(int(s.total), int(share.weight),
-                               _total_weight(self, split_id, int(s.recipient_count)))
+        weights = _weights(self, split_id, int(s.recipient_count))
+        amounts = _apportion(int(s.total), weights)
+        amount = amounts[index]
 
         # Mark paid BEFORE the transfer and in the same call. If the transfer
         # fails, the whole transaction reverts and `paid` rolls back with it,
@@ -191,25 +192,37 @@ class DepositSplit(gl.Contract):
         self.shares[key] = share
 
         s.released = u256(int(s.released) + amount)
-        if int(s.released) >= int(s.total):
+        # Close when no share is left unpaid. Checking the shares themselves is
+        # stricter than comparing `released` to `total`: it holds even if some
+        # share is worth zero units, and it cannot be fooled by accounting
+        # drift. The two agree once apportionment sums to `total`.
+        if _unpaid_count(self, split_id, int(s.recipient_count)) == 0:
             s.status = FINALIZED
             s.closed_at = u256(_now())
         self.splits[split_id] = s
 
         # Emitted after the storage writes, outside any nondet block.
-        get_contract_at(caller).emit_transfer(value=u256(amount))
+        # Apportionment can assign a share 0 units when the pot has fewer
+        # units than recipients. `emit_transfer` rejects a zero value, so
+        # skip it: the share is still marked paid, which lets the split close
+        # instead of crashing on the last claimant and stranding the split.
+        if amount > 0:
+            get_contract_at(caller).emit_transfer(value=u256(amount))
         return amount
 
     # -- recovery -----------------------------------------------------------
 
     @gl.public.write
     def void(self, split_id: str) -> str:
-        """Cancel an open split and return the unclaimed remainder to its creator.
+        """Cancel an open split and refund the UNCLAIMED remainder.
 
         This is the explicit recovery path a creator needs when recipients
-        cannot or will not claim. All shares must still be unpaid: once anyone
-        has been paid, voiding would leave partial settlement that cannot be
-        reversed, so the split can only finish by claims.
+        cannot or will not claim. It refunds exactly what is still held:
+        `total - released`. Before, void was refused as soon as any single
+        share had been paid, which meant a split whose remaining recipients
+        were unreachable kept their funds forever. Refunding the remainder is
+        safe because no paid share can be revived — the split moves to VOID,
+        which `claim` rejects.
         """
         s = self.splits.get(split_id)
         if s is None:
@@ -222,19 +235,21 @@ class DepositSplit(gl.Contract):
         if caller != s.creator:
             raise gl.vm.UserError("only the creator may void")
 
-        count = int(s.recipient_count)
-        for i in range(count):
-            share = self.shares.get(f"{split_id}:{i}")
-            if share is not None and share.paid:
-                raise gl.vm.UserError("cannot void after a payout")
+        released = int(s.released)
+        refund = int(s.total) - released
+        if refund < 0:
+            # Defensive: released should never exceed total.
+            raise gl.vm.UserError("split accounting is inconsistent")
 
-        refund = int(s.total)
         s.status = VOID
         s.closed_at = u256(_now())
-        s.released = u256(refund)
+        s.released = u256(int(s.total))
         self.splits[split_id] = s
 
-        get_contract_at(s.creator).emit_transfer(value=u256(refund))
+        # Nothing to send when every unit was already claimed; emitting a
+        # zero-value transfer would be a wasted cross-contract message.
+        if refund > 0:
+            get_contract_at(s.creator).emit_transfer(value=u256(refund))
         return VOID
 
     # -- views --------------------------------------------------------------
@@ -277,9 +292,18 @@ class DepositSplit(gl.Contract):
         share = self.shares.get(f"{split_id}:{index}")
         if s is None or share is None:
             return 0
-        return _share_amount(
-            int(s.total), int(share.weight),
-            _total_weight(self, split_id, int(s.recipient_count)),
+        return _apportion(
+            int(s.total), _weights(self, split_id, int(s.recipient_count))
+        )[index]
+
+    @gl.public.view
+    def preview_all(self, split_id: str) -> list:
+        """Every share's payout, in index order. Sums to `total`."""
+        s = self.splits.get(split_id)
+        if s is None:
+            return []
+        return _apportion(
+            int(s.total), _weights(self, split_id, int(s.recipient_count))
         )
 
     @gl.public.view
@@ -310,14 +334,67 @@ def _total_weight(contract, split_id: str, count: int) -> int:
     return total
 
 
+def _unpaid_count(contract, split_id: str, count: int) -> int:
+    n = 0
+    for i in range(count):
+        share = contract.shares.get(f"{split_id}:{i}")
+        if share is not None and not share.paid:
+            n += 1
+    return n
+
+
 def _share_amount(total: int, weight: int, total_weight: int) -> int:
     """Floor payout for one weight.
 
-    Flooring means the sum of payouts can be less than the pot by at most
-    `recipients - 1` wei of dust per split. That dust stays in the contract
-    rather than being pushed to the last claimant, because pushing it makes the
-    claimant's payout depend on claim order.
+    Retained for callers that only have one share's data. The contract itself
+    uses `_apportion` so that a pot is fully distributed; see that function.
     """
     if total_weight <= 0:
         return 0
     return (total * weight) // total_weight
+
+
+def _weights(contract, split_id: str, count: int) -> list:
+    out = []
+    for i in range(count):
+        share = contract.shares.get(f"{split_id}:{i}")
+        out.append(int(share.weight) if share is not None else 0)
+    return out
+
+
+def _apportion(total: int, weights: list) -> list:
+    """Split `total` so the parts sum to exactly `total`.
+
+    Plain flooring (`total * weight // total_weight`) leaves up to
+    `recipients - 1` units stranded. Those units were unrecoverable: the split
+    never reached `finalized`, because `released` could not equal `total`, and
+    `void` refuses once any share is paid. A 1000 pot across three equal
+    weights paid 333 + 333 + 333 and left 1 unit locked forever.
+
+    This is largest-remainder (Hamilton) apportionment:
+
+      1. give every share its floor,
+      2. distribute the leftover units one each, to the shares with the
+         largest remainders,
+      3. break remainder ties by lower index.
+
+    Every share lands within [floor, ceil] of its exact quota, so nobody is
+    under- or over-paid by more than one unit. The result depends only on the
+    stored weights and `total` — never on claim order — because the tie-break
+    is a fixed function of the index. It is recomputed identically at every
+    `claim`, so it needs no extra storage and no migration.
+    """
+    tw = sum(weights)
+    if tw <= 0:
+        return [0] * len(weights)
+    base = [(total * w) // tw for w in weights]
+    rem = [(total * w) % tw for w in weights]
+    left = total - sum(base)
+    # Only `left < len(weights)` can occur, but guard anyway in case of a
+    # future change to how weights are stored.
+    if left > 0:
+        order = sorted(range(len(weights)), key=lambda i: (-rem[i], i))
+        for i in order[:left]:
+            base[i] += 1
+    return base
+
