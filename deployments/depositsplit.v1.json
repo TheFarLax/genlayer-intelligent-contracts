@@ -1,0 +1,13 @@
+{
+  "contract": "depositsplit",
+  "network": "studionet",
+  "chain_id": 61999,
+  "rpc": "https://studio.genlayer.com/api",
+  "address": "0x9aD2b1fDF07E64B64538B8E38F417B6FF9247C87",
+  "deployer": "0x05C55d0d2Ba7fe495492849fEca1BF2bBF939a4C",
+  "deploy_tx": "0x9e6edf3fbdbcd35e10d6794467f02eac2e9c69c15c0f0e0981527002aa575706",
+  "status": "FINALIZED",
+  "constructor_args": [],
+  "source_sha256": "402778fb641e9d7d183d58bbf394bd063d6b5417a15205b5a9ad94c6ef224995",
+  "superseded_reason": "rounding bug: floored shares stranded up to recipients-1 units and the split could never finalize or be voided"
+}

@@ -74,6 +74,30 @@ def balance_wei(addr: str) -> int:
     return int(client.provider.make_request(method="eth_getBalance", params=[addr, "latest"])["result"], 16)
 
 
+def _retry_net(fn, n: int = 12, delay: float = 3.0):
+    """Retry a read-only call across transient network faults only.
+
+    Studionet occasionally drops a connection mid-request. Views have no side
+    effects, so retrying is safe; a genuine contract error reproduces every
+    time and is raised after the final attempt.
+    """
+    last = None
+    for _ in range(n):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            msg = str(e)
+            transient = any(k in msg for k in (
+                "Connection", "RemoteDisconnected", "timed out", "timeout",
+                "resolve", "aborted", "ConnectionError",
+            ))
+            if not transient:
+                raise
+            time.sleep(delay)
+    raise last  # type: ignore[misc]
+
+
 def _find_contract_address(obj: Any) -> Optional[str]:
     if isinstance(obj, dict):
         for key in ("contract_address", "to"):
@@ -106,9 +130,14 @@ def wait(transaction_hash: str, tries: int = 120) -> Any:
             return receipt
         except Exception as e:  # noqa: BLE001 - polling, any error is retryable
             last = e
-            status = client.provider.make_request(
-                method="gen_getTransactionStatus", params=[transaction_hash]
-            ).get("result")
+            try:
+                status = client.provider.make_request(
+                    method="gen_getTransactionStatus", params=[transaction_hash]
+                ).get("result")
+            except Exception as e2:  # noqa: BLE001 - the status call itself can drop
+                last = e2
+                time.sleep(3)
+                continue
             if status in ("UNDETERMINED", "CANCELED"):
                 raise RuntimeError(f"transaction ended {status}: {last}") from last
             time.sleep(2)

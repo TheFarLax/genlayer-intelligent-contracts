@@ -11,9 +11,9 @@ constructor-address circularity between the two.
 | 1 | ClaimPin | Pins a web claim and re-checks it against its live source | 18 | deployed & verified |
 | 2 | ForecastLedger | Registers price-direction forecasts, settles them against a live source | 29 | deployed & verified incl. live settlement |
 | 3 | OutcomeFeed | Append-only, idempotent feed of decided outcomes | 24 | deployed & verified |
-| 4 | DepositSplit | Weighted, payable split of a deposited pot with duplicate-settlement protection and a creator void path | 24 | deployed; `create`/`preview` verified live, **claim/void payouts not yet exercised on chain** |
+| 4 | DepositSplit | Weighted, payable split of a deposited pot with duplicate-settlement protection and a creator void path | 35 | redeployed with apportionment fix; accounting verified live, **payout to a wallet FAILS on chain** — see below |
 
-Total: **95 direct-mode tests pass** (`/root/glvenv/bin/python -m pytest tests/direct -q`).
+Total: **106 direct-mode tests pass** (`/root/glvenv/bin/python -m pytest tests/direct -q`).
 
 A fifth contract, SpecLint, was built, tested, and deployed but **dropped from
 the bundle** after persistent consensus instability on Studionet (transactions
@@ -132,7 +132,7 @@ constructor args, deploy); `scripts/glnet.py` does exactly that via RPC.
 | ClaimPin | 0x93f8E437CB0AdA264c13Ae0b8D1068507157d63A | (see `deployments/claimpin.json`) |
 | ForecastLedger | 0x805C35978d7B51C787F0d12CaEF0E069e737dDD7 | 0xa9ceb842…cf3166 |
 | OutcomeFeed | 0xe167B9301eC2a59E5448ED65CC4F44573142A626 | 0x75f9f741…38b6d06b |
-| DepositSplit | 0x9aD2b1fDF07E64B64538B8E38F417B6FF9247C87 | (see `deployments/depositsplit.json`) |
+| DepositSplit | 0x1D2202D5a55f2DA6Fd51BA32503866E60E83d315 | `0x12d9fd68…09ef62` (supersedes `0x9aD2b1fD…` v1) |
 
 All source hashes in `deployments/*.json` match the current files in
 `contracts/` (checked with SHA-256 on 2026-10-28). Superseded deployments
@@ -179,13 +179,17 @@ per contract, against the chain with real consensus and real models:
   is rejected with `count` unchanged. The `authorize` write itself is
   additionally covered by 6 direct tests (one-shot, producer-only, bad-writer
   rejection, authorized writer appends, everyone else still refused).
-- **DepositSplit** — a payable `create` of 1000 with weights [1, 3] records
-  `total=1000` and previews 250/750; zero-value and duplicate-recipient
-  creates revert with the expected messages; `count` unchanged by rejections.
-  **Not verified live:** `claim` (the `emit_transfer` payout), split closing,
-  and the `void` refund. Those paths are covered only by direct-mode tests —
-  the transfer leg has never been exercised against Studionet. See
-  `docs/usage.md` for the exact list of unverified items.
+- **DepositSplit** — a payable `create` records the pot and previews the
+  shares; zero-value and duplicate-recipient creates revert with the expected
+  messages; `count` unchanged by rejections. On the new instance, `sp-0`
+  (1000 over three equal weights) apportioned to **334/333/333** and reached
+  `finalized`, fixing the flooring lock-up; `sp-1` claimed 500 and was then
+  voided with a 500 remainder.
+  **The payout leg fails on chain.** `claim` and `void` emit the value as a
+  message to the recipient, and a recipient with no contract code fails with
+  `Contract 0x… not found` (`value_credited: false`). Recipient balances
+  never changed and the funds remain in the contract. See `docs/usage.md`
+  for the transaction table.
 
 Rerun any of them with:
 
@@ -236,11 +240,12 @@ verified-vs-unverified table and the harness reproduction steps.
 - **Settlement is retryable, never silent.** If a source is unreadable at the
   deadline, `settle` reverts with `source unavailable` and the forecast stays
   PENDING rather than being settled on a guess.
-- **DepositSplit accounting.** Payouts are floored (`total * weight //
-  total_weight`), so the sum of payouts never exceeds the pot; leftover dust
-  stays in the contract rather than depending on claim order. The `paid` flag
-  is written before the transfer in the same transaction, so a failed
-  transfer rolls it back. `void` refunds only while no share has been paid.
+- **DepositSplit accounting.** Shares use largest-remainder apportionment, so
+  they sum to exactly the pot and no unit is stranded; the tie-break is by
+  index, so amounts never depend on claim order. The `paid` flag is written
+  before the transfer in the same transaction, so a failed transfer rolls it
+  back. `void` refunds `total - released`, so a partially claimed split can
+  still recover what is left.
 - **Views report absence instead of reverting** where an RPC path would
   otherwise turn the revert into an opaque "execution failed".
 
@@ -269,11 +274,16 @@ verified-vs-unverified table and the harness reproduction steps.
    can sit in `ACCEPTED` past the 2-second wait and still finalize; treat
    "timed out waiting" as "still processing" and re-check the status before
    concluding anything.
-6. **DepositSplit payouts are floored**, so a split only reaches `finalized`
-   when the floors sum to `total`. `total=1000, weights=[1,3]` distributes
-   exactly; `total=1000, weights=[1,1,1]` leaves 1 wei in the contract and
-   the split stays `open` forever (and cannot be voided once a share is
-   paid). Real amounts in micro-units make this negligible, but it is a
-   genuine edge case.
-7. **ClaimPin's cooldown and sticky-`broken` behavior** are covered by direct
+6. **DepositSplit cannot pay a wallet on Studionet.** `emit_transfer`
+   delivers value as a message to a contract; an address with no code fails
+   with `Contract 0x… not found` and `value_credited: false`. Verified with
+   four attempts (three fresh recipients and the creator wallet). The
+   accounting is correct and finalizes; only the outward transfer fails, and
+   the funds stay in the contract. The old flooring bug that stranded
+   remainders is fixed (largest-remainder apportionment).
+7. **The direct harness does not model cross-contract delivery.** With no
+   `_gl_call_hook`, it returns `None` for any cross-contract request and
+   never checks that the target exists, which is why 31 DepositSplit tests
+   including payout assertions passed against non-working behaviour.
+8. **ClaimPin's cooldown and sticky-`broken` behavior** are covered by direct
    tests only; they were not separately exercised against Studionet.
