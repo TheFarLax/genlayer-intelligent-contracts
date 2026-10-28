@@ -148,3 +148,61 @@ def test_missing_key_is_reported(direct_vm, direct_deploy):
     assert c.get("nope")["found"] is False
     assert c.key_for("nope") == ""
     assert c.get_producer().lower() == _sender_hex(direct_vm).lower()
+
+
+# --- one-shot authorization --------------------------------------------------
+
+def test_producer_authorizes_one_writer(direct_vm, direct_deploy):
+    c = _deploy(direct_deploy, direct_vm)
+    writer = "0x" + "77" * 20
+    assert c.authorize(writer) is True
+    assert c.get_authorized().lower() == writer
+
+    # A second authorization is refused, even by the producer.
+    with direct_vm.expect_revert("already exists"):
+        c.authorize("0x" + "88" * 20)
+
+
+def test_only_producer_may_authorize(direct_vm, direct_deploy):
+    other = "0x" + "11" * 20
+    c = _deploy(direct_deploy, direct_vm, producer=other)
+    with direct_vm.expect_revert("only the producer may authorize"):
+        c.authorize(_sender_hex(direct_vm))
+
+
+def test_authorize_rejects_bad_writers(direct_vm, direct_deploy):
+    c = _deploy(direct_deploy, direct_vm)
+    with direct_vm.expect_revert("writer is required"):
+        c.authorize("")
+    with direct_vm.expect_revert("zero address"):
+        c.authorize("0x0000000000000000000000000000000000000000")
+    with direct_vm.expect_revert("must not be the producer"):
+        c.authorize(_sender_hex(direct_vm))
+
+
+def test_authorized_writer_can_append(direct_vm, direct_deploy):
+    """The whole point: the ledger contract, authorized once, may append."""
+    c = _deploy(direct_deploy, direct_vm)
+    writer = "0x" + "77" * 20
+    c.authorize(writer)
+
+    # Prank as the authorized writer contract address.
+    direct_vm.sender = writer
+    key = _app(c, ref="fc-lw", subject="ETH", status="hit")
+    assert c.get(key)["found"] is True
+    assert c.get(key)["status"] == "hit"
+
+
+def test_still_refuses_everyone_else(direct_vm, direct_deploy):
+    c = _deploy(direct_deploy, direct_vm)
+    c.authorize("0x" + "77" * 20)
+    direct_vm.sender = "0x" + "99" * 20
+    with direct_vm.expect_revert("only the producer may append"):
+        _app(c)
+
+
+def test_unauthorized_before_authorization(direct_vm, direct_deploy):
+    other = "0x" + "11" * 20
+    c = _deploy(direct_deploy, direct_vm, producer=other)
+    with direct_vm.expect_revert("only the producer may append"):
+        _app(c)

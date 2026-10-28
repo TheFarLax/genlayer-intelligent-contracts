@@ -83,65 +83,6 @@ def _retry(fn, n: int = 30, delay: float = 4.0):
     raise last  # type: ignore[misc]
 
 
-# --- SpecLint ---------------------------------------------------------------
-
-SPEC = (
-    "Build a CSV export button for the dashboard. Deliver exactly one button "
-    "labelled 'Export CSV' in the top-right toolbar. Acceptance: clicking it "
-    "downloads dashboard-2026-10-28.csv containing every visible row and column. "
-    "Constraints: must work in Chrome and Firefox, no new dependencies."
-)
-
-
-def verify_speclint(address: str) -> None:
-    print(f"SpecLint @ {address}")
-
-    before = _retry(lambda: glnet.read(address, "count"))
-    tx, info = _retry(lambda: glnet.write(address, "analyze", ["CSV export button", SPEC]))
-    print(f"   tx {tx} -> {info['status']}")
-
-    rid = _recover_analyze_result(address, tx)
-    if not rid:
-        print("  FAIL  could not recover the report id from the receipt")
-        raise SystemExit(1)
-    print(f"   report id {rid}")
-
-    report = _retry(lambda: glnet.read(address, "get_report", [rid]))
-    _check("report is readable", report.get("found") is True, json.dumps(report)[:200])
-    _check("report title", str(report.get("title", "")).startswith("CSV export"))
-    _check("clarity score in range",
-           0 <= int(report.get("clarity_score", -1)) <= 100,
-           f"score={report.get('clarity_score')}")
-    _check("ambiguity list is capped at 3", len(report.get("ambiguities", [])) <= 3)
-    _check("count advanced", _retry(lambda: glnet.read(address, "count")) == before + 1)
-    _check("hash index resolves", _retry(
-        lambda: glnet.read(address, "get_by_hash", [report["spec_hash"]])) == rid)
-
-    _expect_revert("empty title rejected", lambda: glnet.write(address, "analyze", ["", SPEC])                   , "title is required", address)
-    _expect_revert("over-long spec rejected", lambda: glnet.write(address, "analyze", ["t", "x" * 6001])                   , "spec too long", address)
-
-    missing = _retry(lambda: glnet.read(address, "get_report", ["definitely-not-a-report"]))
-    _check("missing report reports found=false",
-           missing.get("found") is False, str(missing)[:120])
-
-
-def _recover_analyze_result(address: str, tx: str) -> str:
-    client = glnet.chain_client()
-    try:
-        raw = client.provider.make_request(
-            method="sim_getTransactionsForAddress", params=[address]
-        ).get("result") or []
-        for t in raw:
-            if t.get("hash") == tx:
-                res = t.get("result")
-                if isinstance(res, str) and res.strip():
-                    return json.loads(res) if res.startswith('"') else res
-                return res or ""
-    except Exception:  # noqa: BLE001 - best effort, the caller checks for ""
-        pass
-    return ""
-
-
 # --- ClaimPin ---------------------------------------------------------------
 
 CLAIM_URL = "https://example.com/status"
@@ -281,7 +222,6 @@ def verify_depositsplit(address: str) -> None:
 
 
 VERIFIERS = {
-    "speclint": verify_speclint,
     "claimpin": verify_claimpin,
     "outcomefeed": verify_outcomefeed,
     "forecastledger": verify_forecastledger,

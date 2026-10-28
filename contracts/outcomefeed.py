@@ -51,6 +51,14 @@ class OutcomeFeed(gl.Contract):
     # history without scanning the whole feed.
     by_subject: TreeMap[str, DynArray[str]]
     producer: Address
+    # A second authorized writer, set once by the producer. This resolves the
+    # constructor-arg circularity between a ledger that must name its feed at
+    # deploy time and a feed that must name the ledger as producer: the feed
+    # deploys first (producer = the deployer's wallet), the ledger deploys
+    # second pointing at the feed, and the deployer then authorizes the ledger.
+    # One-shot and producer-gated, so it cannot become an open door.
+    authorized: Address
+    has_authorized: bool
     total: u256
 
     def __init__(self, producer: str):
@@ -61,7 +69,43 @@ class OutcomeFeed(gl.Contract):
         self.producer = Address(producer)
         if self.producer == Address(_MAX_NO_PRODUCER):
             raise gl.vm.UserError("producer must not be the zero address")
+        self.has_authorized = False
+        self.authorized = Address(_MAX_NO_PRODUCER)
         self.total = u256(0)
+
+    # -- authorization -------------------------------------------------------
+
+    @gl.public.write
+    def authorize(self, writer: str) -> bool:
+        """Grant ONE additional address the right to append.
+
+        Callable only by the producer, exactly once, to a non-zero address
+        that is not the producer. Intended use: the deployer wallet
+        authorizes the ForecastLedger contract after both are deployed — the
+        only way to resolve the circular address dependency without weakening
+        producer-only access.
+        """
+        if gl.message.sender_address != self.producer:
+            raise gl.vm.UserError("only the producer may authorize")
+        if self.has_authorized:
+            raise gl.vm.UserError("an authorized writer already exists")
+        writer = (writer or "").strip()
+        if not writer:
+            raise gl.vm.UserError("writer is required")
+        candidate = Address(writer)
+        if candidate == Address(_MAX_NO_PRODUCER):
+            raise gl.vm.UserError("writer must not be the zero address")
+        if candidate == self.producer:
+            raise gl.vm.UserError("writer must not be the producer")
+
+        self.authorized = candidate
+        self.has_authorized = True
+        return True
+
+    def _can_write(self, sender) -> bool:
+        if sender == self.producer:
+            return True
+        return self.has_authorized and sender == self.authorized
 
     # -- append -------------------------------------------------------------
 
@@ -86,7 +130,12 @@ class OutcomeFeed(gl.Contract):
         `observed_micros` uses the same integer micro-unit convention as the
         producer: 3000.50 USD is 3000500000.
         """
-        if gl.message.sender_address != self.producer:
+        sender = gl.message.sender_address
+        if not isinstance(sender, Address):
+            # Some hosts surface the sender as a plain hex string; normalize
+            # before comparing so the check cannot be bypassed by form.
+            sender = Address(str(sender))
+        if not self._can_write(sender):
             raise gl.vm.UserError("only the producer may append")
 
         ref = (ref or "").strip()
@@ -195,3 +244,8 @@ class OutcomeFeed(gl.Contract):
     @gl.public.view
     def get_producer(self) -> str:
         return self.producer.as_hex
+
+    @gl.public.view
+    def get_authorized(self) -> str:
+        """The second authorized writer, or the zero address if none."""
+        return self.authorized.as_hex if self.has_authorized else Address(_MAX_NO_PRODUCER).as_hex

@@ -3,12 +3,12 @@
   "network": "studionet",
   "chain_id": 61999,
   "rpc": "https://studio.genlayer.com/api",
-  "address": "0x6B2e9B7907C68220D65030F81b278975004D0db7",
+  "address": "0x805C35978d7B51C787F0d12CaEF0E069e737dDD7",
   "deployer": "0x05C55d0d2Ba7fe495492849fEca1BF2bBF939a4C",
-  "deploy_tx": "0x1a95765fc9b55e3c0572c15a2ddf4709e344b1f88ca813cc9d9e18ff735809e6",
+  "deploy_tx": "0xa9ceb842da9b9f405c7ccffdada46aa350e4bbb5e44410323256796b0acf3166",
   "status": "FINALIZED",
   "constructor_args": [
-    "0xc02784300D9E58cCd26feB6B97205bc5a8fFDc8C"
+    "0xe167B9301eC2a59E5448ED65CC4F44573142A626"
   ],
   "source_sha256": "5ceb56e9ba810480d3e01bbe27c2b744896148b707ff9eae0bf5acaf1a032add"
 }
