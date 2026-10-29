@@ -254,140 +254,6 @@ A second call reverts with `an authorized writer already exists`.
 
 ---
 
-## DepositSplit — `0x1D2202D5a55f2DA6Fd51BA32503866E60E83d315`
-
-Splits a deposited GEN pot across weighted recipients; each recipient claims
-their own share once.
-
-Supersedes `0x9aD2b1fDF07E64B64538B8E38F417B6FF9247C87`, which had the
-flooring bug described under "Rounding" below; that instance is unchanged and
-recorded in `deployments/depositsplit.v1.json`.
-
-> **CRITICAL, verified on chain 2026-10-28: `claim` and `void` cannot move
-> value to a normal wallet.** GenLayer delivers the payout as a message to
-> the recipient address, and an address with no contract code fails with
-> `Contract 0x… not found`; `value_credited` is `false` and the recipient's
-> balance does not change. The contract's own balance is also unchanged, so
-> the funds stay in the contract. This was measured with three fresh EOA
-> recipients and with the creator wallet itself:
->
-> | Attempt | Tx | Result |
-> |---|---|---|
-> | claim 334 to EOA | `0x4a76cbcd…` | `Contract 0xE1b9… not found`, credited false |
-> | claim 500 to EOA | `0xc0463527…` | `Contract 0xE1b9… not found`, credited false |
-> | void refund 500 to creator | `0x97f80f95…` | `Contract 0x05C5… not found`, credited false |
-> | claim 500 to creator wallet | `0x34ec986a…` | `Contract 0x05C5… not found`, credited false |
->
-> The *accounting* is correct and finalized in every case: shares are marked
-> paid, `released` tracks `paid_amount`, and the split reaches `finalized`.
-> Only the outward transfer fails. A recipient that is a deployed GenLayer
-> contract implementing `__receive__` is the supported shape; that half was
-> not proven end to end before this handoff stopped.
-
-> **State of the new instance:** splits `sp-0` (three equal weights, 1000,
-> finalized as 334/333/333) and `sp-1` (500 paid then voided) were created and
-> finalized on chain; their payouts are the failed transfers listed above.
-> The contract holds those funds.
-
-### `create(title, recipients, weights) -> split_id`  (payable)
-
-| Input | Example |
-|-------|---------|
-| `title` | `"Team payout"` |
-| `recipients` | `["0x…a11", "0x…b22"]` |
-| `weights` | `[1, 3]` |
-| `value` | `1000` wei |
-
-```python
-glnet.write(DEPOSIT, "create", ["Team payout", [A, B], [1, 3]], value=1000)
-# -> "sp-0"
-```
-
-**Expected view output after `create`**:
-
-```json
-{"found": true, "split_id": "sp-0",
- "creator": "0x05C55d0d2Ba7fe495492849fEca1BF2bBF939a4C",
- "title": "Team payout", "total": 1000, "released": 0,
- "recipient_count": 2, "status": "open",
- "created_at": 1793188514, "closed_at": 0}
-```
-
-```python
-glnet.read(DEPOSIT, "preview", ["sp-0", 0])   # -> 250
-glnet.read(DEPOSIT, "preview", ["sp-0", 1])   # -> 750
-```
-
-### `claim(split_id) -> amount`
-
-```python
-glnet.write(DEPOSIT, "claim", ["sp-0"])   # as recipient A -> 250
-```
-
-Payouts use largest-remainder apportionment (see "Rounding" below), so the
-shares always sum to exactly `total`. The `paid` flag is written before the
-transfer in the same transaction, so a failed transfer rolls the flag back
-with it. The split moves to `status: "finalized"` when no share is left
-unpaid.
-
-**Verified live:** the accounting (share amounts, `paid`, `released`,
-`finalized`) is correct. The outward transfer is not — see the CRITICAL note
-at the top of this section. Reverts: `split not found`, `split is not open`,
-`caller is not a recipient`, `already paid`.
-
-### Rounding
-
-Plain floor division (`total * weight // total_weight`) strands up to
-`recipients - 1` units. Those units were unrecoverable: the split never
-reached `finalized`, and `void` refused once a share had been paid. Measured
-before the fix: a 1000 pot over three equal weights paid 333+333+333, left
-999 of 1000 released, and stayed `open` forever.
-
-The fix is largest-remainder (Hamilton) apportionment:
-
-1. give every share its floor,
-2. distribute the leftover units one each to the largest remainders,
-3. break remainder ties by lower index.
-
-Every share lands within `[floor, ceil]` of its exact quota, and the shares
-sum to exactly `total`. The tie-break is a fixed function of the index, so
-the result never depends on claim order. Verified live: `sp-0` previews
-`[334, 333, 333]` and finalized with exactly those amounts.
-
-### `void(split_id) -> "void"`
-
-```python
-glnet.write(DEPOSIT, "void", ["sp-0"])   # as the creator
-```
-
-Creator-only, and allowed even after a partial payout: it refunds the
-**unclaimed remainder** (`total - released`), not the whole pot, so paid
-shares are never refunded twice. Marks the split `void` and sets
-`released = total`. A zero remainder emits nothing.
-
-Refusing after a payout (the old behaviour) trapped funds for recipients who
-never claimed, so this was changed. Reverts: `split not found`,
-`split is not open`, `only the creator may void`.
-
-**Verified live:** the remainder arithmetic and the `void` status are
-correct (`sp-1`: 500 claimed, remainder 500). The refund transfer itself
-failed to reach the creator wallet — same `Contract … not found` cause as
-`claim`.
-
-### Rejections (verified live)
-
-| Call | Error message |
-|------|---------------|
-| `create("t", [A, B], [1, 3])` with value 0 | `deposit must be positive` |
-| `create("t", [A, A], [1, 1])` with value 10 | `duplicate recipient at index 1` |
-| `create("", ...)` with value 10 | `title is required` |
-| `create("t", [A], [1, 2])` with value 10 | `recipients and weights must be the same length` |
-| `create("t", [A], [0])` with value 10 | `weight must be positive at index 0` |
-
-`count()` is unchanged by rejected creates.
-
----
-
 ## What was verified where
 
 This is the distinction that matters for judging the bundle. "Direct test"
@@ -405,52 +271,10 @@ models.
 | ForecastLedger → OutcomeFeed finalized message | yes (hook capture) | **yes (end-to-end, count 0→1)** |
 | OutcomeFeed `append`, idempotency, tally, rejections | yes | **yes** (current + predecessor deployment) |
 | OutcomeFeed `authorize` one-shot semantics | yes | **yes** |
-| DepositSplit `create` + preview + amount checks | yes | **yes** |
-| DepositSplit `create` rejections | yes | **yes** |
-| DepositSplit remainder apportionment (sums to pot) | yes | **yes** (`sp-0` = 334/333/333) |
-| DepositSplit split closing after last claim | yes | **yes** (`sp-0` finalized) |
-| DepositSplit `void` after partial payout (remainder) | yes | **yes** (`sp-1`, remainder 500) |
-| **DepositSplit `claim` value reaching a wallet** | yes (unrealistically) | **NO — fails: "Contract … not found"** |
-| **DepositSplit `void` refund reaching a wallet** | yes (unrealistically) | **NO — fails the same way** |
-| **DepositSplit payout to a contract recipient** | not modelled | **NOT PROVEN** (fixture attempt stopped) |
-
-### The DepositSplit caveat, stated plainly
-
-DepositSplit is a **working ledger of who is owed what** with a **broken
-payout leg for wallet recipients**. Concretely, verified on chain:
-
-- The accounting is correct: shares are apportioned so they sum to the pot,
-  `paid`/`paid_amount` are recorded, and the split finalizes.
-- The transfer does not work for a plain address. Every attempt produced a
-  FINALIZED message whose result was `Contract 0x… not found` with
-  `value_credited: false`. Recipient balances stayed 0 and the contract's
-  balance was unchanged, so the funds sit in the contract.
-
-Why the local tests did not catch it: the gltest direct harness, with no
-`_gl_call_hook` installed, returns `None` for any cross-contract request and
-never checks whether the target contract exists. It therefore reported 31
-passing DepositSplit tests, including payout assertions, against behaviour
-that cannot work on chain.
-
-What is still unproven:
-
-1. That a recipient which *is* a deployed GenLayer contract implementing
-   `__receive__` receives the value. This is the supported shape per the SDK
-   (`emit_transfer` docs say the receiver catches it in `__receive__`), and
-   cross-contract *view* calls were proven working on chain, but the
-   value-transfer half was not demonstrated before this work stopped.
-2. Whether any mechanism exists in this GenVM version to pay an
-   externally-owned wallet at all.
-
-Treat the deployed instance as unsafe for real payouts until (1) is shown.
-The contract holds the test deposits; `glnet.balance_wei(address)` versus
-`get_split(sid)["released"]` shows what an attempt moved (nothing).
-
----
 
 ## Reproducing the test environment
 
-The 106 direct-mode tests need **three patches to the installed `gltest`
+The 71 direct-mode tests need **three patches to the installed `gltest`
 package**. They are shipped here as real diffs in `patches/`, generated
 against a pristine `genlayer-test==0.29.2`, and verified to apply cleanly and
 reproduce the working tree byte-for-byte.
@@ -466,7 +290,7 @@ patch -p1 < /root/bundle1/patches/0001-wasi_mock.patch
 patch -p1 < /root/bundle1/patches/0002-vm.patch
 
 cd /root/bundle1
-/root/glvenv/bin/python -m pytest tests/direct -q     # 106 passed
+/root/glvenv/bin/python -m pytest tests/direct -q     # 71 passed
 ```
 
 ### What the three patches fix, and why they are needed

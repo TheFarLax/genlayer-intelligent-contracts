@@ -1,6 +1,6 @@
-# GenLayer Bundle 1 — four intelligent contracts
+# GenLayer Bundle 1 — three intelligent contracts
 
-Four small, independently useful GenLayer contracts, built and tested locally
+Three small, independently useful GenLayer contracts, built and tested locally
 with the `genlayer-test` direct-mode harness and deployed to GenLayer Studio
 testnet ("Studionet", chain id 61999). ForecastLedger publishes its decided
 outcomes to OutcomeFeed through a one-shot authorization that resolves the
@@ -11,16 +11,23 @@ constructor-address circularity between the two.
 | 1 | ClaimPin | Pins a web claim and re-checks it against its live source | 18 | deployed & verified |
 | 2 | ForecastLedger | Registers price-direction forecasts, settles them against a live source | 29 | deployed & verified incl. live settlement |
 | 3 | OutcomeFeed | Append-only, idempotent feed of decided outcomes | 24 | deployed & verified |
-| 4 | DepositSplit | Weighted, payable split of a deposited pot with duplicate-settlement protection and a creator void path | 35 | redeployed with apportionment fix; accounting verified live, **payout to a wallet FAILS on chain** — see below |
 
-Total: **106 direct-mode tests pass** (`/root/glvenv/bin/python -m pytest tests/direct -q`).
+Total: **71 direct-mode tests pass** (`/root/glvenv/bin/python -m pytest tests/direct -q`).
 
-A fifth contract, SpecLint, was built, tested, and deployed but **dropped from
-the bundle** after persistent consensus instability on Studionet (transactions
+Two further contracts were dropped from the bundle. SpecLint was built,
+tested, and deployed but **dropped** after persistent consensus instability
+on Studionet (transactions
 intermittently ending UNDETERMINED with validator votes that never executed
 the validator function — a consensus-layer behavior the local harness cannot
 reproduce). Its source and history are preserved in `archive/` and git; the
 investigation record is kept at `docs/speclint-debugging-notes.md`.
+
+DepositSplit was built, tested, and deployed, and its source is preserved in
+`archive/depositsplit/`, but it was **dropped** because its payout leg does
+not work: `emit_transfer` cannot credit a wallet on Studionet (see
+`archive/depositsplit/NOTES.md`). Its deployed instances remain on chain and
+are not modified. It is not part of the supported bundle and its tests are
+no longer collected by `pytest tests/direct`.
 
 ## Layout
 
@@ -112,8 +119,7 @@ PY
   will authorize the ledger).
 - ForecastLedger takes one optional constructor arg: the OutcomeFeed address.
   Omit it for a standalone ledger.
-- ClaimPin and DepositSplit take no constructor args.
-- DepositSplit's `create` must be called with `value` (GEN attached).
+- ClaimPin takes no constructor args.
 
 **Wiring ForecastLedger → OutcomeFeed** (resolves the circular dependency):
 deploy the feed first (producer = your wallet), then the ledger (constructor
@@ -132,7 +138,6 @@ constructor args, deploy); `scripts/glnet.py` does exactly that via RPC.
 | ClaimPin | 0x93f8E437CB0AdA264c13Ae0b8D1068507157d63A | (see `deployments/claimpin.json`) |
 | ForecastLedger | 0x805C35978d7B51C787F0d12CaEF0E069e737dDD7 | 0xa9ceb842…cf3166 |
 | OutcomeFeed | 0xe167B9301eC2a59E5448ED65CC4F44573142A626 | 0x75f9f741…38b6d06b |
-| DepositSplit | 0x1D2202D5a55f2DA6Fd51BA32503866E60E83d315 | `0x12d9fd68…09ef62` (supersedes `0x9aD2b1fD…` v1) |
 
 All source hashes in `deployments/*.json` match the current files in
 `contracts/` (checked with SHA-256 on 2026-10-28). Superseded deployments
@@ -179,17 +184,6 @@ per contract, against the chain with real consensus and real models:
   is rejected with `count` unchanged. The `authorize` write itself is
   additionally covered by 6 direct tests (one-shot, producer-only, bad-writer
   rejection, authorized writer appends, everyone else still refused).
-- **DepositSplit** — a payable `create` records the pot and previews the
-  shares; zero-value and duplicate-recipient creates revert with the expected
-  messages; `count` unchanged by rejections. On the new instance, `sp-0`
-  (1000 over three equal weights) apportioned to **334/333/333** and reached
-  `finalized`, fixing the flooring lock-up; `sp-1` claimed 500 and was then
-  voided with a 500 remainder.
-  **The payout leg fails on chain.** `claim` and `void` emit the value as a
-  message to the recipient, and a recipient with no contract code fails with
-  `Contract 0x… not found` (`value_credited: false`). Recipient balances
-  never changed and the funds remain in the contract. See `docs/usage.md`
-  for the transaction table.
 
 Rerun any of them with:
 
@@ -197,9 +191,8 @@ Rerun any of them with:
 /root/glvenv/bin/python scripts/verify.py <contract>
 ```
 
-All four verifiers were run again on 2026-10-28 against the current
-deployments and reported `ALL CHECKS PASSED`:
-`claimpin`, `forecastledger`, `outcomefeed`, `depositsplit`. These runs are
+All three verifiers were run against the current deployments and reported
+`ALL CHECKS PASSED`: `claimpin`, `forecastledger`, `outcomefeed`. These runs are
 write-side smoke tests (they add records), so the live counts grow with each
 rerun; that is expected, not drift. One fix was needed in `verify.py` for
 these runs: the Studionet transaction index lags finalization, so
@@ -212,9 +205,8 @@ contract defect.
 
 All contracts are plain GenVM contracts; any GenLayer client can call them.
 Views: `count`, plus per-contract getters (`get_claim`, `get_forecast`,
-`get`, `get_split`, `subject_tally`, `get_record`, `get_producer`,
-`get_authorized`, …). Writes: `register`/`recheck`, `register`/`settle`,
-`append`/`authorize`, `create`/`claim`/`void`.
+`get`, `subject_tally`, `get_record`, `get_producer`, `get_authorized`, …).
+Writes: `register`/`recheck`, `register`/`settle`, `append`/`authorize`.
 
 **`docs/usage.md` has a worked example per contract**: exact argument lists
 with realistic values, the expected view output after each call, and the
@@ -240,12 +232,6 @@ verified-vs-unverified table and the harness reproduction steps.
 - **Settlement is retryable, never silent.** If a source is unreadable at the
   deadline, `settle` reverts with `source unavailable` and the forecast stays
   PENDING rather than being settled on a guess.
-- **DepositSplit accounting.** Shares use largest-remainder apportionment, so
-  they sum to exactly the pot and no unit is stranded; the tie-break is by
-  index, so amounts never depend on claim order. The `paid` flag is written
-  before the transfer in the same transaction, so a failed transfer rolls it
-  back. `void` refunds `total - released`, so a partially claimed split can
-  still recover what is left.
 - **Views report absence instead of reverting** where an RPC path would
   otherwise turn the revert into an opaque "execution failed".
 
@@ -274,16 +260,10 @@ verified-vs-unverified table and the harness reproduction steps.
    can sit in `ACCEPTED` past the 2-second wait and still finalize; treat
    "timed out waiting" as "still processing" and re-check the status before
    concluding anything.
-6. **DepositSplit cannot pay a wallet on Studionet.** `emit_transfer`
-   delivers value as a message to a contract; an address with no code fails
-   with `Contract 0x… not found` and `value_credited: false`. Verified with
-   four attempts (three fresh recipients and the creator wallet). The
-   accounting is correct and finalizes; only the outward transfer fails, and
-   the funds stay in the contract. The old flooring bug that stranded
-   remainders is fixed (largest-remainder apportionment).
-7. **The direct harness does not model cross-contract delivery.** With no
+6. **The direct harness does not model cross-contract delivery.** With no
    `_gl_call_hook`, it returns `None` for any cross-contract request and
-   never checks that the target exists, which is why 31 DepositSplit tests
-   including payout assertions passed against non-working behaviour.
-8. **ClaimPin's cooldown and sticky-`broken` behavior** are covered by direct
+   never checks that the target exists. Pass rate in direct mode is therefore
+   no evidence for any value- or cross-contract-message path; those must be
+   checked live. This is what hid the DepositSplit payout defect.
+7. **ClaimPin's cooldown and sticky-`broken` behavior** are covered by direct
    tests only; they were not separately exercised against Studionet.

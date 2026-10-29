@@ -206,42 +206,10 @@ def verify_forecastledger(address: str) -> None:
            _retry(lambda: glnet.read(address, "count")) == before + 1)
 
 
-# --- DepositSplit -----------------------------------------------------------
-
-RECIPIENTS = ["0x" + "b1" * 20, "0x" + "c2" * 20]
-
-
-def verify_depositsplit(address: str) -> None:
-    print(f"DepositSplit @ {address}")
-
-    before = _retry(lambda: glnet.read(address, "count"))
-    tx, info = _retry(lambda: glnet.write(
-        address, "create", ["verification split", RECIPIENTS, [1, 3]], value=1000
-    ))
-    print(f"   create tx {tx} -> {info['status']}")
-
-    sid = f"sp-{before}"
-    s = _retry(lambda: glnet.read(address, "get_split", [sid]))
-    _check("split is readable", s.get("found") is True, str(s)[:200])
-    _check("deposit recorded", s.get("total") == 1000, f"total={s.get('total')}")
-    _check("share 0 previews 250", _retry(
-        lambda: glnet.read(address, "preview", [sid, 0])) == 250)
-    _check("share 1 previews 750", _retry(
-        lambda: glnet.read(address, "preview", [sid, 1])) == 750)
-
-    _expect_revert("zero deposit rejected", lambda: glnet.write(address, "create", ["t", RECIPIENTS, [1, 1]])                   , "deposit must be positive", address)
-    _expect_revert("duplicate recipient rejected", lambda: glnet.write(address, "create",
-                                       ["t", [RECIPIENTS[0], RECIPIENTS[0]], [1, 1]],
-                                       value=10)                   , "duplicate recipient", address)
-    _check("count unchanged after rejections",
-           _retry(lambda: glnet.read(address, "count")) == before + 1)
-
-
 VERIFIERS = {
     "claimpin": verify_claimpin,
     "outcomefeed": verify_outcomefeed,
     "forecastledger": verify_forecastledger,
-    "depositsplit": verify_depositsplit,
 }
 
 
